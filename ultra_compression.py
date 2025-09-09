@@ -24,7 +24,7 @@ class UltraCompressionApp:
     def __init__(self, root):
         self.root = root
         self.root.title("UltraCompression - Compression Intelligente 7zip")
-        self.root.geometry("800x600")
+        self.root.geometry("1200x700")
         self.root.resizable(True, True)
         
         # Variables d'état
@@ -47,6 +47,11 @@ class UltraCompressionApp:
             
         self.setup_ui()
         self.update_drives()
+        
+        # Log d'initialisation
+        self.log_realtime("🚀 UltraCompression initialisé", "INFO")
+        self.log_realtime(f"📦 7zip trouvé: {os.path.basename(self.seven_zip_path)}", "INFO")
+        self.log_realtime(f"💻 Système: {self.optimizer.disk_type}, {self.optimizer.cpu_count} cores", "INFO")
         
         # Démarrer la mise à jour de la progression
         self.root.after(100, self.update_progress)
@@ -113,9 +118,15 @@ class UltraCompressionApp:
         
         self.compression_scale.configure(command=self.update_compression_label)
         
-        # Informations sur la compression
-        info_frame = ttk.LabelFrame(main_frame, text="Informations", padding="10")
-        info_frame.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=20)
+        # Frame pour informations et logs (côte à côte)
+        info_logs_frame = ttk.Frame(main_frame)
+        info_logs_frame.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=20)
+        info_logs_frame.columnconfigure(0, weight=1)
+        info_logs_frame.columnconfigure(1, weight=1)
+        
+        # Informations sur la compression (à gauche)
+        info_frame = ttk.LabelFrame(info_logs_frame, text="Informations", padding="10")
+        info_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
         info_frame.columnconfigure(1, weight=1)
         
         ttk.Label(info_frame, text="Fichiers traités:").grid(row=0, column=0, sticky=tk.W)
@@ -137,6 +148,35 @@ class UltraCompressionApp:
         ttk.Label(info_frame, text="Optimisations:").grid(row=4, column=0, sticky=tk.W)
         self.optimizations_label = ttk.Label(info_frame, text="Détection automatique")
         self.optimizations_label.grid(row=4, column=1, sticky=tk.W, padx=(10, 0))
+        
+        # Section logs en temps réel (à droite)
+        logs_frame = ttk.LabelFrame(info_logs_frame, text="Logs en Temps Réel", padding="10")
+        logs_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(10, 0))
+        logs_frame.columnconfigure(0, weight=1)
+        logs_frame.rowconfigure(1, weight=1)
+        
+        # Boutons de contrôle des logs
+        logs_buttons_frame = ttk.Frame(logs_frame)
+        logs_buttons_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        logs_buttons_frame.columnconfigure(2, weight=1)
+        
+        self.copy_logs_btn = ttk.Button(logs_buttons_frame, text="📋 Copier", 
+                                       command=self.copy_logs_to_clipboard, width=8)
+        self.copy_logs_btn.grid(row=0, column=0, padx=(0, 5))
+        
+        self.clear_logs_btn = ttk.Button(logs_buttons_frame, text="🗑️ Effacer", 
+                                        command=self.clear_real_time_logs, width=8)
+        self.clear_logs_btn.grid(row=0, column=1, padx=(5, 0))
+        
+        # Zone de texte pour les logs en temps réel
+        self.realtime_log_text = tk.Text(logs_frame, height=8, wrap=tk.WORD, 
+                                        font=("Consolas", 9), state=tk.DISABLED)
+        logs_scrollbar = ttk.Scrollbar(logs_frame, orient=tk.VERTICAL, 
+                                      command=self.realtime_log_text.yview)
+        self.realtime_log_text.configure(yscrollcommand=logs_scrollbar.set)
+        
+        self.realtime_log_text.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        logs_scrollbar.grid(row=1, column=1, sticky=(tk.N, tk.S))
         
         # Barre de progression
         progress_frame = ttk.LabelFrame(main_frame, text="Progression", padding="10")
@@ -213,11 +253,46 @@ class UltraCompressionApp:
             self.drive_combo.current(0)
     
     def log_message(self, message):
-        """Ajoute un message au journal"""
+        """Ajoute un message au journal principal"""
         timestamp = time.strftime("%H:%M:%S")
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.log_text.see(tk.END)
         self.root.update_idletasks()
+    
+    def log_realtime(self, message, level="INFO"):
+        """Ajoute un message aux logs en temps réel de façon asynchrone"""
+        timestamp = time.strftime("%H:%M:%S.%f")[:-3]  # Millisecondes
+        
+        # Définir les couleurs selon le niveau
+        colors = {
+            "INFO": "black",
+            "ANALYSIS": "blue",
+            "COMPRESS": "green",
+            "ERROR": "red",
+            "WARNING": "orange",
+            "SUCCESS": "dark green"
+        }
+        color = colors.get(level, "black")
+        
+        # Ajouter au queue pour traitement asynchrone
+        self.progress_queue.put(("realtime_log", timestamp, level, message, color))
+    
+    def copy_logs_to_clipboard(self):
+        """Copie les logs en temps réel dans le presse-papier"""
+        try:
+            logs_content = self.realtime_log_text.get("1.0", tk.END)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(logs_content)
+            self.log_message("Logs copiés dans le presse-papier")
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Impossible de copier les logs: {e}")
+    
+    def clear_real_time_logs(self):
+        """Efface les logs en temps réel"""
+        self.realtime_log_text.config(state=tk.NORMAL)
+        self.realtime_log_text.delete("1.0", tk.END)
+        self.realtime_log_text.config(state=tk.DISABLED)
+        self.log_message("Logs en temps réel effacés")
     
     def get_drive_path(self):
         """Extrait le chemin du disque sélectionné"""
@@ -247,6 +322,10 @@ class UltraCompressionApp:
         """Compresse un fichier individuel avec 7zip"""
         try:
             output_path = file_path + ".7z"
+            filename = os.path.basename(file_path)
+            
+            # Log du début de compression
+            self.log_realtime(f"🔄 {filename}", "COMPRESS")
             
             # Obtenir les paramètres optimisés
             file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
@@ -286,23 +365,37 @@ class UltraCompressionApp:
         
         self.log_message(f"Démarrage de la compression sur {drive_path}")
         self.log_message(f"Niveau de compression: {self.compression_level.get()}")
+        self.log_realtime(f"🚀 Initialisation de la compression", "INFO")
+        self.log_realtime(f"📁 Disque cible: {drive_path}", "INFO")
+        self.log_realtime(f"⚙️ Niveau de compression: {self.compression_level.get()}", "INFO")
         
         # Compter les fichiers
         self.progress_queue.put(("status", "Analyse des fichiers..."))
+        self.log_realtime("🔍 Début de l'analyse des fichiers...", "ANALYSIS")
         self.total_files = self.count_files(drive_path)
         self.progress_queue.put(("total", self.total_files))
         
         if self.total_files == 0:
+            self.log_realtime("⚠️ Aucun fichier éligible trouvé", "WARNING")
             self.progress_queue.put(("complete", "Aucun fichier à compresser"))
             return
         
         self.log_message(f"Fichiers à traiter: {self.total_files}")
+        self.log_realtime(f"📊 {self.total_files} fichiers éligibles détectés", "ANALYSIS")
         
         # Collecter tous les fichiers éligibles
         files_to_compress = []
+        current_dir = ""
         for root, dirs, files in os.walk(drive_path):
             if not self.is_compressing:
                 break
+            
+            # Log du répertoire en cours d'analyse
+            if root != current_dir:
+                current_dir = root
+                rel_path = os.path.relpath(root, drive_path)
+                if rel_path != ".":
+                    self.log_realtime(f"📂 Analyse: {rel_path}", "ANALYSIS")
             
             # Filtrer les dossiers système
             dirs[:] = [d for d in dirs if not any(sys_folder in os.path.join(root, d) 
@@ -315,10 +408,12 @@ class UltraCompressionApp:
         
         # Optimiser l'ordre des fichiers pour maximiser la vitesse
         self.progress_queue.put(("status", "Optimisation de l'ordre des fichiers..."))
+        self.log_realtime("🔧 Optimisation de l'ordre des fichiers...", "ANALYSIS")
         files_to_compress = self.optimizer.optimize_file_order(files_to_compress)
         files_to_compress = self.optimizer.group_files_by_location(files_to_compress)
         
         # Estimer le temps de compression
+        self.log_realtime("📈 Calcul des estimations de performance...", "ANALYSIS")
         estimation = self.optimizer.estimate_compression_time(files_to_compress)
         self.log_message(f"Estimation: {estimation['estimated_minutes']:.1f} minutes pour {estimation['total_size_mb']:.1f} MB")
         self.progress_queue.put(("time_estimate", f"{estimation['estimated_minutes']:.1f} min"))
@@ -327,10 +422,14 @@ class UltraCompressionApp:
         disk_type = self.optimizer.disk_type
         cpu_count = self.optimizer.cpu_count
         self.progress_queue.put(("optimizations", f"{disk_type}, {cpu_count} CPU cores"))
+        self.log_realtime(f"💾 Type de disque détecté: {disk_type}", "INFO")
+        self.log_realtime(f"🖥️ CPU cores disponibles: {cpu_count}", "INFO")
         
         # Nombre optimal de workers
         max_workers = self.optimizer.get_optimal_thread_count(len(files_to_compress))
         self.log_message(f"Utilisation de {max_workers} threads pour la compression")
+        self.log_realtime(f"⚡ Configuration: {max_workers} threads parallèles", "INFO")
+        self.log_realtime("🎯 Début de la compression...", "COMPRESS")
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Soumettre les tâches
@@ -352,16 +451,26 @@ class UltraCompressionApp:
                     
                     if success:
                         self.progress_queue.put(("log", message))
+                        # Log en temps réel pour succès
+                        filename = os.path.basename(file_path)
+                        self.log_realtime(f"✅ {filename}", "SUCCESS")
                     else:
                         self.progress_queue.put(("error_log", message))
+                        # Log en temps réel pour erreur
+                        filename = os.path.basename(file_path)
+                        self.log_realtime(f"❌ {filename} - {message}", "ERROR")
                         
                 except Exception as e:
                     self.progress_queue.put(("error_log", f"Erreur inattendue: {e}"))
+                    filename = os.path.basename(file_path)
+                    self.log_realtime(f"💥 {filename} - Erreur inattendue: {e}", "ERROR")
                     self.processed_files += 1
         
         if self.is_compressing:
+            self.log_realtime("🎉 Compression terminée avec succès!", "SUCCESS")
             self.progress_queue.put(("complete", f"Compression terminée! {self.processed_files} fichiers traités"))
         else:
+            self.log_realtime("⏹️ Compression arrêtée par l'utilisateur", "WARNING")
             self.progress_queue.put(("stopped", "Compression arrêtée par l'utilisateur"))
     
     def update_progress(self):
@@ -398,6 +507,37 @@ class UltraCompressionApp:
                 
                 elif item[0] == "optimizations":
                     self.optimizations_label.config(text=item[1])
+                
+                elif item[0] == "realtime_log":
+                    timestamp, level, message, color = item[1], item[2], item[3], item[4]
+                    self.realtime_log_text.config(state=tk.NORMAL)
+                    
+                    # Ajouter le message avec la couleur appropriée
+                    log_line = f"[{timestamp}] {message}\n"
+                    self.realtime_log_text.insert(tk.END, log_line)
+                    
+                    # Appliquer la couleur au message (pas au timestamp)
+                    start_pos = self.realtime_log_text.index(f"{tk.END}-1c linestart")
+                    end_pos = self.realtime_log_text.index(f"{tk.END}-1c")
+                    
+                    # Créer un tag pour cette couleur si nécessaire
+                    tag_name = f"color_{level.lower()}"
+                    if tag_name not in self.realtime_log_text.tag_names():
+                        self.realtime_log_text.tag_configure(tag_name, foreground=color)
+                    
+                    # Appliquer le tag à la ligne (après le timestamp)
+                    timestamp_end = f"{start_pos}+{len(f'[{timestamp}] ')}c"
+                    self.realtime_log_text.tag_add(tag_name, timestamp_end, end_pos)
+                    
+                    # Faire défiler vers le bas et limiter le nombre de lignes
+                    self.realtime_log_text.see(tk.END)
+                    
+                    # Limiter à 1000 lignes pour éviter la surcharge mémoire
+                    lines = int(self.realtime_log_text.index('end-1c').split('.')[0])
+                    if lines > 1000:
+                        self.realtime_log_text.delete("1.0", "100.0")
+                    
+                    self.realtime_log_text.config(state=tk.DISABLED)
                     
                 elif item[0] == "error":
                     messagebox.showerror("Erreur", item[1])
