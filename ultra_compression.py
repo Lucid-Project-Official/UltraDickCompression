@@ -343,23 +343,56 @@ class UltraCompressionApp:
                     ignored_dirs += 1
                     self.log_realtime(f"🚫 Dossier ignoré: {excluded_dir} (système)", "WARNING")
                 
-                # Analyser chaque fichier
+                # Analyser chaque fichier avec gestion d'erreurs robuste
                 eligible_in_dir = 0
                 ignored_in_dir = 0
+                error_in_dir = 0
+                
                 for file in files:
-                    file_path = os.path.join(root, file)
-                    if self.optimizer.should_compress_file(file_path):
-                        count += 1
-                        eligible_in_dir += 1
-                    else:
-                        ignored_files += 1
-                        ignored_in_dir += 1
-                        # Logger seulement quelques exemples pour éviter la surcharge
-                        if ignored_in_dir <= 3:  # Limiter à 3 exemples par répertoire
-                            reason = self._get_exclusion_reason(file_path)
-                            self.log_realtime(f"⚠️ Fichier ignoré: {file} ({reason})", "WARNING")
-                        elif ignored_in_dir == 4:
-                            self.log_realtime(f"⚠️ ... et {len(files) - eligible_in_dir - 3} autres fichiers ignorés", "WARNING")
+                    try:
+                        file_path = os.path.join(root, file)
+                        
+                        # Vérifier si le fichier existe et est accessible
+                        if not os.path.exists(file_path):
+                            error_in_dir += 1
+                            if error_in_dir <= 2:  # Logger quelques erreurs
+                                self.log_realtime(f"❌ Fichier introuvable: {file}", "ERROR")
+                            continue
+                        
+                        # Tester l'accès au fichier
+                        try:
+                            os.path.getsize(file_path)  # Test d'accès basique
+                        except (OSError, IOError, PermissionError) as e:
+                            error_in_dir += 1
+                            if error_in_dir <= 2:
+                                self.log_realtime(f"❌ Erreur d'accès: {file} ({e})", "ERROR")
+                            continue
+                        
+                        # Vérifier l'éligibilité du fichier
+                        if self.optimizer.should_compress_file(file_path):
+                            count += 1
+                            eligible_in_dir += 1
+                        else:
+                            ignored_files += 1
+                            ignored_in_dir += 1
+                            # Logger seulement quelques exemples pour éviter la surcharge
+                            if ignored_in_dir <= 3:  # Limiter à 3 exemples par répertoire
+                                reason = self._get_exclusion_reason(file_path)
+                                self.log_realtime(f"⚠️ Fichier ignoré: {file} ({reason})", "WARNING")
+                            elif ignored_in_dir == 4:
+                                remaining_ignored = len(files) - eligible_in_dir - error_in_dir - 3
+                                if remaining_ignored > 0:
+                                    self.log_realtime(f"⚠️ ... et {remaining_ignored} autres fichiers ignorés", "WARNING")
+                    
+                    except Exception as e:
+                        error_in_dir += 1
+                        if error_in_dir <= 2:  # Logger les premières erreurs
+                            self.log_realtime(f"💥 Erreur inattendue sur {file}: {e}", "ERROR")
+                        continue
+                
+                # Logger les erreurs du répertoire si il y en a
+                if error_in_dir > 2:
+                    self.log_realtime(f"⚠️ {error_in_dir} erreurs d'accès dans ce répertoire", "WARNING")
                 
                 # Résumé pour ce répertoire
                 if files:  # Seulement si le répertoire contient des fichiers
@@ -380,30 +413,49 @@ class UltraCompressionApp:
         return count
     
     def _get_exclusion_reason(self, file_path):
-        """Détermine la raison pour laquelle un fichier est exclu"""
+        """Détermine la raison pour laquelle un fichier est exclu avec gestion d'erreurs robuste"""
         try:
+            # Vérifier d'abord si le fichier existe
+            if not os.path.exists(file_path):
+                return "fichier inexistant"
+            
             path_obj = Path(file_path)
             
             # Vérifier les dossiers système
-            if any(sys_folder in str(path_obj) for sys_folder in config.SYSTEM_FOLDERS):
-                return "dossier système"
+            try:
+                if any(sys_folder in str(path_obj) for sys_folder in config.SYSTEM_FOLDERS):
+                    return "dossier système"
+            except Exception:
+                pass
             
             # Vérifier les extensions système
-            if path_obj.suffix.lower() in config.SYSTEM_EXTENSIONS:
-                return "extension système"
+            try:
+                if path_obj.suffix.lower() in config.SYSTEM_EXTENSIONS:
+                    return "extension système"
+            except Exception:
+                pass
             
             # Vérifier les fichiers déjà compressés
-            if path_obj.suffix.lower() in config.IGNORE_EXTENSIONS:
-                return "déjà compressé"
+            try:
+                if path_obj.suffix.lower() in config.IGNORE_EXTENSIONS:
+                    return "déjà compressé"
+            except Exception:
+                pass
             
             # Vérifier la taille minimale
-            if os.path.getsize(file_path) < config.MIN_FILE_SIZE:
-                return "trop petit"
+            try:
+                file_size = os.path.getsize(file_path)
+                if file_size < config.MIN_FILE_SIZE:
+                    return f"trop petit ({file_size} bytes)"
+            except (OSError, IOError, PermissionError) as e:
+                return f"erreur taille: {e}"
+            except Exception as e:
+                return f"erreur accès: {e}"
             
-            return "autre raison"
+            return "critères non remplis"
             
-        except Exception:
-            return "erreur d'accès"
+        except Exception as e:
+            return f"erreur analyse: {e}"
     
     def compress_file(self, file_path, compression_level):
         """Compresse un fichier individuel avec 7zip"""
@@ -470,59 +522,125 @@ class UltraCompressionApp:
         self.log_message(f"Fichiers à traiter: {self.total_files}")
         self.log_realtime(f"📊 {self.total_files} fichiers éligibles détectés", "ANALYSIS")
         
-        # Collecter tous les fichiers éligibles
+        # Collecter tous les fichiers éligibles avec gestion d'erreurs
         self.log_realtime("📋 Collecte des fichiers pour la compression...", "ANALYSIS")
         files_to_compress = []
         current_dir = ""
         collected_count = 0
+        collection_errors = 0
         
-        for root, dirs, files in os.walk(drive_path):
-            if not self.is_compressing:
-                self.log_realtime("⏹️ Collecte interrompue par l'utilisateur", "WARNING")
-                break
-            
-            # Log du répertoire en cours de collecte (seulement tous les 10 répertoires)
-            if root != current_dir:
-                current_dir = root
-                rel_path = os.path.relpath(root, drive_path)
-                if rel_path != "." and len(files_to_compress) % 50 == 0:  # Log tous les 50 fichiers collectés
-                    self.log_realtime(f"📁 Collecte: {rel_path} ({len(files_to_compress)} fichiers collectés)", "ANALYSIS")
-            
-            # Filtrer les dossiers système
-            dirs[:] = [d for d in dirs if not any(sys_folder in os.path.join(root, d) 
-                      for sys_folder in config.SYSTEM_FOLDERS)]
-            
-            # Collecter les fichiers éligibles
-            eligible_in_dir = 0
-            for file in files:
-                file_path = os.path.join(root, file)
-                if self.optimizer.should_compress_file(file_path):
-                    files_to_compress.append(file_path)
-                    collected_count += 1
-                    eligible_in_dir += 1
-            
-            # Log du nombre de fichiers collectés (seulement pour les gros répertoires)
-            if eligible_in_dir > 10:  # Seulement si plus de 10 fichiers dans le répertoire
-                dir_name = os.path.basename(root) if rel_path != "." else "racine"
-                self.log_realtime(f"✅ {dir_name}: {eligible_in_dir} fichiers ajoutés à la file", "ANALYSIS")
+        try:
+            for root, dirs, files in os.walk(drive_path):
+                if not self.is_compressing:
+                    self.log_realtime("⏹️ Collecte interrompue par l'utilisateur", "WARNING")
+                    break
+                
+                try:
+                    # Log du répertoire en cours de collecte (seulement tous les 50 fichiers)
+                    if root != current_dir:
+                        current_dir = root
+                        rel_path = os.path.relpath(root, drive_path)
+                        if rel_path != "." and len(files_to_compress) % 50 == 0:
+                            self.log_realtime(f"📁 Collecte: {rel_path} ({len(files_to_compress)} fichiers collectés)", "ANALYSIS")
+                    
+                    # Filtrer les dossiers système avec gestion d'erreurs
+                    try:
+                        dirs[:] = [d for d in dirs if not any(sys_folder in os.path.join(root, d) 
+                                  for sys_folder in config.SYSTEM_FOLDERS)]
+                    except Exception as e:
+                        self.log_realtime(f"⚠️ Erreur filtrage dossiers: {e}", "WARNING")
+                    
+                    # Collecter les fichiers éligibles
+                    eligible_in_dir = 0
+                    for file in files:
+                        try:
+                            file_path = os.path.join(root, file)
+                            
+                            # Vérification d'accès avant d'appeler should_compress_file
+                            if not os.path.exists(file_path):
+                                collection_errors += 1
+                                continue
+                            
+                            if self.optimizer.should_compress_file(file_path):
+                                files_to_compress.append(file_path)
+                                collected_count += 1
+                                eligible_in_dir += 1
+                                
+                        except Exception as e:
+                            collection_errors += 1
+                            if collection_errors <= 5:  # Logger quelques erreurs
+                                self.log_realtime(f"❌ Erreur collecte {file}: {e}", "ERROR")
+                            continue
+                    
+                    # Log du nombre de fichiers collectés (seulement pour les gros répertoires)
+                    if eligible_in_dir > 10:
+                        try:
+                            dir_name = os.path.basename(root) if rel_path != "." else "racine"
+                            self.log_realtime(f"✅ {dir_name}: {eligible_in_dir} fichiers ajoutés à la file", "ANALYSIS")
+                        except Exception:
+                            pass
+                            
+                except Exception as e:
+                    collection_errors += 1
+                    if collection_errors <= 3:
+                        self.log_realtime(f"💥 Erreur dans répertoire {root}: {e}", "ERROR")
+                    continue
+                    
+        except Exception as e:
+            self.log_realtime(f"💥 Erreur critique de collecte: {e}", "ERROR")
+            self.log_message(f"Erreur critique lors de la collecte: {e}")
+        
+        # Logger les erreurs de collecte
+        if collection_errors > 5:
+            self.log_realtime(f"⚠️ {collection_errors} erreurs de collecte au total", "WARNING")
         
         self.log_realtime(f"📦 Collecte terminée: {collected_count} fichiers prêts pour compression", "ANALYSIS")
+        
+        # Vérification de cohérence
+        if collected_count != self.total_files:
+            difference = abs(collected_count - self.total_files)
+            self.log_realtime(f"⚠️ Incohérence détectée: {difference} fichiers de différence entre analyse et collecte", "WARNING")
+            self.log_realtime(f"   Analysés: {self.total_files}, Collectés: {collected_count}", "WARNING")
+            if collection_errors > 0:
+                self.log_realtime(f"   Possiblement dû aux {collection_errors} erreurs de collecte", "WARNING")
         
         # Optimiser l'ordre des fichiers pour maximiser la vitesse
         self.progress_queue.put(("status", "Optimisation de l'ordre des fichiers..."))
         self.log_realtime("🔧 Optimisation de l'ordre des fichiers...", "ANALYSIS")
         
-        # Analyser les types de fichiers avant optimisation
+        # Analyser les types de fichiers avant optimisation avec gestion d'erreurs
         file_types = {}
         total_size = 0
+        analysis_errors = 0
+        
         for file_path in files_to_compress:
             try:
+                # Vérifier que le fichier existe encore
+                if not os.path.exists(file_path):
+                    analysis_errors += 1
+                    continue
+                
                 ext = Path(file_path).suffix.lower() or "sans_extension"
                 size = os.path.getsize(file_path)
                 file_types[ext] = file_types.get(ext, 0) + 1
                 total_size += size
-            except:
+                
+            except (OSError, IOError, PermissionError) as e:
+                analysis_errors += 1
+                if analysis_errors <= 3:  # Logger quelques erreurs
+                    filename = os.path.basename(file_path)
+                    self.log_realtime(f"❌ Erreur analyse {filename}: {e}", "ERROR")
                 continue
+            except Exception as e:
+                analysis_errors += 1
+                if analysis_errors <= 3:
+                    filename = os.path.basename(file_path)
+                    self.log_realtime(f"💥 Erreur inattendue {filename}: {e}", "ERROR")
+                continue
+        
+        # Logger les erreurs d'analyse
+        if analysis_errors > 3:
+            self.log_realtime(f"⚠️ {analysis_errors} erreurs d'analyse des types de fichiers", "WARNING")
         
         # Logger les statistiques des types de fichiers
         self.log_realtime("📈 Analyse des types de fichiers:", "ANALYSIS")
@@ -531,12 +649,18 @@ class UltraCompressionApp:
         
         self.log_realtime(f"💾 Taille totale à compresser: {total_size/(1024*1024):.1f} MB", "ANALYSIS")
         
-        # Optimisation de l'ordre
-        self.log_realtime("🎯 Tri par priorité et taille...", "ANALYSIS")
-        files_to_compress = self.optimizer.optimize_file_order(files_to_compress)
-        
-        self.log_realtime("📂 Groupement par répertoire...", "ANALYSIS")
-        files_to_compress = self.optimizer.group_files_by_location(files_to_compress)
+        # Optimisation de l'ordre avec gestion d'erreurs
+        try:
+            self.log_realtime("🎯 Tri par priorité et taille...", "ANALYSIS")
+            files_to_compress = self.optimizer.optimize_file_order(files_to_compress)
+            
+            self.log_realtime("📂 Groupement par répertoire...", "ANALYSIS")
+            files_to_compress = self.optimizer.group_files_by_location(files_to_compress)
+            
+        except Exception as e:
+            self.log_realtime(f"⚠️ Erreur d'optimisation: {e}", "WARNING")
+            self.log_realtime("📋 Utilisation de l'ordre par défaut", "INFO")
+            # Continuer avec la liste non optimisée
         
         # Estimer le temps de compression
         self.log_realtime("📈 Calcul des estimations de performance...", "ANALYSIS")
