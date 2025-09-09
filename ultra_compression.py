@@ -32,7 +32,7 @@ class UltraCompressionApp:
         self.compression_thread = None
         self.total_files = 0
         self.processed_files = 0
-        self.progress_queue = queue.Queue()
+        self.progress_queue = queue.Queue(maxsize=1000)  # Limiter la taille de la queue
         self.selected_drive = tk.StringVar()
         self.compression_level = tk.IntVar(value=5)
         
@@ -260,24 +260,32 @@ class UltraCompressionApp:
         self.root.update_idletasks()
     
     def log_realtime(self, message, level="INFO"):
-        """Ajoute un message aux logs en temps réel de façon asynchrone"""
-        import datetime
-        now = datetime.datetime.now()
-        timestamp = now.strftime("%H:%M:%S.") + f"{now.microsecond//1000:03d}"
-        
-        # Définir les couleurs selon le niveau
-        colors = {
-            "INFO": "black",
-            "ANALYSIS": "blue",
-            "COMPRESS": "green",
-            "ERROR": "red",
-            "WARNING": "orange",
-            "SUCCESS": "dark green"
-        }
-        color = colors.get(level, "black")
-        
-        # Ajouter au queue pour traitement asynchrone
-        self.progress_queue.put(("realtime_log", timestamp, level, message, color))
+        """Ajoute un message aux logs en temps réel de façon asynchrone et non-bloquante"""
+        try:
+            import datetime
+            now = datetime.datetime.now()
+            timestamp = now.strftime("%H:%M:%S.") + f"{now.microsecond//1000:03d}"
+            
+            # Définir les couleurs selon le niveau
+            colors = {
+                "INFO": "black",
+                "ANALYSIS": "blue",
+                "COMPRESS": "green",
+                "ERROR": "red",
+                "WARNING": "orange",
+                "SUCCESS": "dark green"
+            }
+            color = colors.get(level, "black")
+            
+            # Ajouter au queue de manière non-bloquante
+            try:
+                self.progress_queue.put_nowait(("realtime_log", timestamp, level, message, color))
+            except queue.Full:
+                # Si la queue est pleine, ignorer ce log pour éviter le blocage
+                pass
+        except Exception:
+            # En cas d'erreur, ne pas bloquer l'application
+            pass
     
     def copy_logs_to_clipboard(self):
         """Copie les logs en temps réel dans le presse-papier"""
@@ -337,6 +345,7 @@ class UltraCompressionApp:
                 
                 # Analyser chaque fichier
                 eligible_in_dir = 0
+                ignored_in_dir = 0
                 for file in files:
                     file_path = os.path.join(root, file)
                     if self.optimizer.should_compress_file(file_path):
@@ -344,9 +353,13 @@ class UltraCompressionApp:
                         eligible_in_dir += 1
                     else:
                         ignored_files += 1
-                        # Déterminer la raison de l'exclusion
-                        reason = self._get_exclusion_reason(file_path)
-                        self.log_realtime(f"⚠️ Fichier ignoré: {file} ({reason})", "WARNING")
+                        ignored_in_dir += 1
+                        # Logger seulement quelques exemples pour éviter la surcharge
+                        if ignored_in_dir <= 3:  # Limiter à 3 exemples par répertoire
+                            reason = self._get_exclusion_reason(file_path)
+                            self.log_realtime(f"⚠️ Fichier ignoré: {file} ({reason})", "WARNING")
+                        elif ignored_in_dir == 4:
+                            self.log_realtime(f"⚠️ ... et {len(files) - eligible_in_dir - 3} autres fichiers ignorés", "WARNING")
                 
                 # Résumé pour ce répertoire
                 if files:  # Seulement si le répertoire contient des fichiers
@@ -468,12 +481,12 @@ class UltraCompressionApp:
                 self.log_realtime("⏹️ Collecte interrompue par l'utilisateur", "WARNING")
                 break
             
-            # Log du répertoire en cours de collecte
+            # Log du répertoire en cours de collecte (seulement tous les 10 répertoires)
             if root != current_dir:
                 current_dir = root
                 rel_path = os.path.relpath(root, drive_path)
-                if rel_path != ".":
-                    self.log_realtime(f"📁 Collecte: {rel_path}", "ANALYSIS")
+                if rel_path != "." and len(files_to_compress) % 50 == 0:  # Log tous les 50 fichiers collectés
+                    self.log_realtime(f"📁 Collecte: {rel_path} ({len(files_to_compress)} fichiers collectés)", "ANALYSIS")
             
             # Filtrer les dossiers système
             dirs[:] = [d for d in dirs if not any(sys_folder in os.path.join(root, d) 
@@ -488,8 +501,8 @@ class UltraCompressionApp:
                     collected_count += 1
                     eligible_in_dir += 1
             
-            # Log du nombre de fichiers collectés dans ce répertoire
-            if eligible_in_dir > 0:
+            # Log du nombre de fichiers collectés (seulement pour les gros répertoires)
+            if eligible_in_dir > 10:  # Seulement si plus de 10 fichiers dans le répertoire
                 dir_name = os.path.basename(root) if rel_path != "." else "racine"
                 self.log_realtime(f"✅ {dir_name}: {eligible_in_dir} fichiers ajoutés à la file", "ANALYSIS")
         
@@ -639,35 +652,39 @@ class UltraCompressionApp:
                     self.optimizations_label.config(text=item[1])
                 
                 elif item[0] == "realtime_log":
-                    timestamp, level, message, color = item[1], item[2], item[3], item[4]
-                    self.realtime_log_text.config(state=tk.NORMAL)
-                    
-                    # Ajouter le message avec la couleur appropriée
-                    log_line = f"[{timestamp}] {message}\n"
-                    self.realtime_log_text.insert(tk.END, log_line)
-                    
-                    # Appliquer la couleur au message (pas au timestamp)
-                    start_pos = self.realtime_log_text.index(f"{tk.END}-1c linestart")
-                    end_pos = self.realtime_log_text.index(f"{tk.END}-1c")
-                    
-                    # Créer un tag pour cette couleur si nécessaire
-                    tag_name = f"color_{level.lower()}"
-                    if tag_name not in self.realtime_log_text.tag_names():
-                        self.realtime_log_text.tag_configure(tag_name, foreground=color)
-                    
-                    # Appliquer le tag à la ligne (après le timestamp)
-                    timestamp_end = f"{start_pos}+{len(f'[{timestamp}] ')}c"
-                    self.realtime_log_text.tag_add(tag_name, timestamp_end, end_pos)
-                    
-                    # Faire défiler vers le bas et limiter le nombre de lignes
-                    self.realtime_log_text.see(tk.END)
-                    
-                    # Limiter à 1000 lignes pour éviter la surcharge mémoire
-                    lines = int(self.realtime_log_text.index('end-1c').split('.')[0])
-                    if lines > 1000:
-                        self.realtime_log_text.delete("1.0", "100.0")
-                    
-                    self.realtime_log_text.config(state=tk.DISABLED)
+                    try:
+                        timestamp, level, message, color = item[1], item[2], item[3], item[4]
+                        self.realtime_log_text.config(state=tk.NORMAL)
+                        
+                        # Ajouter le message de manière simplifiée
+                        log_line = f"[{timestamp}] {message}\n"
+                        self.realtime_log_text.insert(tk.END, log_line)
+                        
+                        # Appliquer la couleur de manière optimisée
+                        start_pos = self.realtime_log_text.index(f"{tk.END}-1c linestart")
+                        end_pos = self.realtime_log_text.index(f"{tk.END}-1c")
+                        
+                        # Créer un tag pour cette couleur si nécessaire
+                        tag_name = f"color_{level.lower()}"
+                        if tag_name not in self.realtime_log_text.tag_names():
+                            self.realtime_log_text.tag_configure(tag_name, foreground=color)
+                        
+                        # Appliquer le tag à la ligne (après le timestamp)
+                        timestamp_end = f"{start_pos}+{len(f'[{timestamp}] ')}c"
+                        self.realtime_log_text.tag_add(tag_name, timestamp_end, end_pos)
+                        
+                        # Faire défiler vers le bas seulement si nécessaire
+                        self.realtime_log_text.see(tk.END)
+                        
+                        # Limiter à 500 lignes pour de meilleures performances
+                        lines = int(self.realtime_log_text.index('end-1c').split('.')[0])
+                        if lines > 500:
+                            self.realtime_log_text.delete("1.0", "50.0")  # Supprimer les 50 premières lignes
+                        
+                        self.realtime_log_text.config(state=tk.DISABLED)
+                    except Exception:
+                        # En cas d'erreur, ignorer ce log pour éviter le crash
+                        pass
                     
                 elif item[0] == "error":
                     messagebox.showerror("Erreur", item[1])
@@ -685,11 +702,13 @@ class UltraCompressionApp:
         except queue.Empty:
             pass
         
-        # Programmer la prochaine mise à jour
+        # Programmer la prochaine mise à jour avec une fréquence adaptative
         if self.is_compressing:
-            self.root.after(100, self.update_progress)
+            # Plus fréquent pendant la compression pour la réactivité
+            self.root.after(50, self.update_progress)
         else:
-            self.root.after(1000, self.update_progress)
+            # Moins fréquent quand inactif pour économiser les ressources
+            self.root.after(200, self.update_progress)
     
     def start_compression(self):
         """Démarre le processus de compression"""
