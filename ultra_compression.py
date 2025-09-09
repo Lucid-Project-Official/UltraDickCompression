@@ -261,7 +261,9 @@ class UltraCompressionApp:
     
     def log_realtime(self, message, level="INFO"):
         """Ajoute un message aux logs en temps réel de façon asynchrone"""
-        timestamp = time.strftime("%H:%M:%S.%f")[:-3]  # Millisecondes
+        import datetime
+        now = datetime.datetime.now()
+        timestamp = now.strftime("%H:%M:%S.") + f"{now.microsecond//1000:03d}"
         
         # Définir les couleurs selon le niveau
         colors = {
