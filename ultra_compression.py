@@ -304,21 +304,93 @@ class UltraCompressionApp:
         return None
     
     def count_files(self, path):
-        """Compte le nombre total de fichiers à traiter"""
+        """Compte le nombre total de fichiers à traiter avec logs détaillés"""
         count = 0
+        total_files_found = 0
+        ignored_files = 0
+        ignored_dirs = 0
+        
         try:
+            self.log_realtime(f"📂 Début du scan récursif de: {path}", "ANALYSIS")
+            
             for root, dirs, files in os.walk(path):
-                # Filtrer les dossiers système
+                if not self.is_compressing:
+                    break
+                
+                # Afficher le répertoire en cours d'analyse
+                rel_path = os.path.relpath(root, path)
+                if rel_path != ".":
+                    self.log_realtime(f"📁 Scan: {rel_path}", "ANALYSIS")
+                
+                # Compter les fichiers trouvés dans ce répertoire
+                total_files_found += len(files)
+                
+                # Filtrer les dossiers système et logger les exclusions
+                original_dirs = dirs.copy()
                 dirs[:] = [d for d in dirs if not any(sys_folder in os.path.join(root, d) 
                           for sys_folder in config.SYSTEM_FOLDERS)]
                 
+                excluded_dirs = set(original_dirs) - set(dirs)
+                for excluded_dir in excluded_dirs:
+                    ignored_dirs += 1
+                    self.log_realtime(f"🚫 Dossier ignoré: {excluded_dir} (système)", "WARNING")
+                
+                # Analyser chaque fichier
+                eligible_in_dir = 0
                 for file in files:
                     file_path = os.path.join(root, file)
                     if self.optimizer.should_compress_file(file_path):
                         count += 1
+                        eligible_in_dir += 1
+                    else:
+                        ignored_files += 1
+                        # Déterminer la raison de l'exclusion
+                        reason = self._get_exclusion_reason(file_path)
+                        self.log_realtime(f"⚠️ Fichier ignoré: {file} ({reason})", "WARNING")
+                
+                # Résumé pour ce répertoire
+                if files:  # Seulement si le répertoire contient des fichiers
+                    dir_name = os.path.basename(root) if rel_path != "." else "racine"
+                    self.log_realtime(f"📊 {dir_name}: {eligible_in_dir}/{len(files)} fichiers éligibles", "ANALYSIS")
+            
+            # Résumé final de l'analyse
+            self.log_realtime(f"✅ Analyse terminée:", "ANALYSIS")
+            self.log_realtime(f"   📁 Fichiers trouvés: {total_files_found}", "ANALYSIS")
+            self.log_realtime(f"   ✅ Fichiers éligibles: {count}", "ANALYSIS")
+            self.log_realtime(f"   ⚠️ Fichiers ignorés: {ignored_files}", "ANALYSIS")
+            self.log_realtime(f"   🚫 Dossiers ignorés: {ignored_dirs}", "ANALYSIS")
+            
         except Exception as e:
             self.log_message(f"Erreur lors du comptage des fichiers: {e}")
+            self.log_realtime(f"💥 Erreur d'analyse: {e}", "ERROR")
+            
         return count
+    
+    def _get_exclusion_reason(self, file_path):
+        """Détermine la raison pour laquelle un fichier est exclu"""
+        try:
+            path_obj = Path(file_path)
+            
+            # Vérifier les dossiers système
+            if any(sys_folder in str(path_obj) for sys_folder in config.SYSTEM_FOLDERS):
+                return "dossier système"
+            
+            # Vérifier les extensions système
+            if path_obj.suffix.lower() in config.SYSTEM_EXTENSIONS:
+                return "extension système"
+            
+            # Vérifier les fichiers déjà compressés
+            if path_obj.suffix.lower() in config.IGNORE_EXTENSIONS:
+                return "déjà compressé"
+            
+            # Vérifier la taille minimale
+            if os.path.getsize(file_path) < config.MIN_FILE_SIZE:
+                return "trop petit"
+            
+            return "autre raison"
+            
+        except Exception:
+            return "erreur d'accès"
     
     def compress_file(self, file_path, compression_level):
         """Compresse un fichier individuel avec 7zip"""
@@ -386,32 +458,71 @@ class UltraCompressionApp:
         self.log_realtime(f"📊 {self.total_files} fichiers éligibles détectés", "ANALYSIS")
         
         # Collecter tous les fichiers éligibles
+        self.log_realtime("📋 Collecte des fichiers pour la compression...", "ANALYSIS")
         files_to_compress = []
         current_dir = ""
+        collected_count = 0
+        
         for root, dirs, files in os.walk(drive_path):
             if not self.is_compressing:
+                self.log_realtime("⏹️ Collecte interrompue par l'utilisateur", "WARNING")
                 break
             
-            # Log du répertoire en cours d'analyse
+            # Log du répertoire en cours de collecte
             if root != current_dir:
                 current_dir = root
                 rel_path = os.path.relpath(root, drive_path)
                 if rel_path != ".":
-                    self.log_realtime(f"📂 Analyse: {rel_path}", "ANALYSIS")
+                    self.log_realtime(f"📁 Collecte: {rel_path}", "ANALYSIS")
             
             # Filtrer les dossiers système
             dirs[:] = [d for d in dirs if not any(sys_folder in os.path.join(root, d) 
                       for sys_folder in config.SYSTEM_FOLDERS)]
             
+            # Collecter les fichiers éligibles
+            eligible_in_dir = 0
             for file in files:
                 file_path = os.path.join(root, file)
                 if self.optimizer.should_compress_file(file_path):
                     files_to_compress.append(file_path)
+                    collected_count += 1
+                    eligible_in_dir += 1
+            
+            # Log du nombre de fichiers collectés dans ce répertoire
+            if eligible_in_dir > 0:
+                dir_name = os.path.basename(root) if rel_path != "." else "racine"
+                self.log_realtime(f"✅ {dir_name}: {eligible_in_dir} fichiers ajoutés à la file", "ANALYSIS")
+        
+        self.log_realtime(f"📦 Collecte terminée: {collected_count} fichiers prêts pour compression", "ANALYSIS")
         
         # Optimiser l'ordre des fichiers pour maximiser la vitesse
         self.progress_queue.put(("status", "Optimisation de l'ordre des fichiers..."))
         self.log_realtime("🔧 Optimisation de l'ordre des fichiers...", "ANALYSIS")
+        
+        # Analyser les types de fichiers avant optimisation
+        file_types = {}
+        total_size = 0
+        for file_path in files_to_compress:
+            try:
+                ext = Path(file_path).suffix.lower() or "sans_extension"
+                size = os.path.getsize(file_path)
+                file_types[ext] = file_types.get(ext, 0) + 1
+                total_size += size
+            except:
+                continue
+        
+        # Logger les statistiques des types de fichiers
+        self.log_realtime("📈 Analyse des types de fichiers:", "ANALYSIS")
+        for ext, count in sorted(file_types.items(), key=lambda x: x[1], reverse=True)[:10]:  # Top 10
+            self.log_realtime(f"   {ext}: {count} fichiers", "ANALYSIS")
+        
+        self.log_realtime(f"💾 Taille totale à compresser: {total_size/(1024*1024):.1f} MB", "ANALYSIS")
+        
+        # Optimisation de l'ordre
+        self.log_realtime("🎯 Tri par priorité et taille...", "ANALYSIS")
         files_to_compress = self.optimizer.optimize_file_order(files_to_compress)
+        
+        self.log_realtime("📂 Groupement par répertoire...", "ANALYSIS")
         files_to_compress = self.optimizer.group_files_by_location(files_to_compress)
         
         # Estimer le temps de compression
@@ -420,17 +531,34 @@ class UltraCompressionApp:
         self.log_message(f"Estimation: {estimation['estimated_minutes']:.1f} minutes pour {estimation['total_size_mb']:.1f} MB")
         self.progress_queue.put(("time_estimate", f"{estimation['estimated_minutes']:.1f} min"))
         
+        # Détails de l'estimation
+        self.log_realtime("⏱️ Estimations détaillées:", "ANALYSIS")
+        self.log_realtime(f"   📊 Taille totale: {estimation['total_size_mb']:.1f} MB", "ANALYSIS")
+        self.log_realtime(f"   📈 Vitesse estimée: {estimation['total_size_mb']/estimation['estimated_minutes']:.1f} MB/min", "ANALYSIS")
+        self.log_realtime(f"   ⏱️ Temps estimé: {estimation['estimated_minutes']:.1f} minutes", "ANALYSIS")
+        
         # Informations d'optimisation
         disk_type = self.optimizer.disk_type
         cpu_count = self.optimizer.cpu_count
+        available_ram = self.optimizer.available_memory / (1024**3)  # GB
+        
         self.progress_queue.put(("optimizations", f"{disk_type}, {cpu_count} CPU cores"))
-        self.log_realtime(f"💾 Type de disque détecté: {disk_type}", "INFO")
-        self.log_realtime(f"🖥️ CPU cores disponibles: {cpu_count}", "INFO")
+        self.log_realtime("🔧 Configuration système détectée:", "INFO")
+        self.log_realtime(f"   💾 Type de disque: {disk_type}", "INFO")
+        self.log_realtime(f"   🖥️ CPU cores: {cpu_count}", "INFO")
+        self.log_realtime(f"   💻 RAM disponible: {available_ram:.1f} GB", "INFO")
         
         # Nombre optimal de workers
         max_workers = self.optimizer.get_optimal_thread_count(len(files_to_compress))
         self.log_message(f"Utilisation de {max_workers} threads pour la compression")
-        self.log_realtime(f"⚡ Configuration: {max_workers} threads parallèles", "INFO")
+        self.log_realtime("⚡ Optimisations appliquées:", "INFO")
+        self.log_realtime(f"   🔀 Threads parallèles: {max_workers}", "INFO")
+        self.log_realtime(f"   📋 Ordre optimisé: {len(files_to_compress)} fichiers", "INFO")
+        
+        # Paramètres 7zip pour ce niveau
+        sample_params = self.optimizer.get_optimal_compression_params(self.compression_level.get())
+        self.log_realtime(f"   🗜️ Paramètres 7zip: {' '.join(sample_params[:3])}", "INFO")
+        
         self.log_realtime("🎯 Début de la compression...", "COMPRESS")
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
